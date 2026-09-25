@@ -37,9 +37,11 @@ whenToUse: 用户要求为项目编写或维护 AGENTS.md、design.md、testing-
 ee6d1864f8ff371b9420a06bff077c7be16bbd4de6412ca115aad0792c0886d5
 ```
 
-本 README 刻意**不复制正文内容**——文档间只用链接引用，这正是角色规范自身要求的
-「引用不复制」纪律。正文请见 [`SKILL.md`](SKILL.md) 或
-[`references/doc-engineer-agent-prompt.md`](references/doc-engineer-agent-prompt.md)。
+README 自身不承载角色规范正文——正文只在
+[`SKILL.md`](SKILL.md) 与 [`references/doc-engineer-agent-prompt.md`](references/doc-engineer-agent-prompt.md)
+里全量保存，README 只用链接引用、不另存一份副本（这正是角色规范自身「引用不复制」纪律的用法）。
+唯一例外是本文件第 5–7 行的角色定位摘要：它与 frontmatter 的 `description` 同源，
+是为了让仓库页首屏能直接读懂这个 skill 做什么，不构成第二份正文。
 
 ## 安装 / 同步到本机 DSH
 
@@ -63,9 +65,9 @@ DSH skill 根目录由 watcher 监视，新增 skill 无需重启即可在下一
 
 ```powershell
 $dst = "$env:USERPROFILE\.dsh\skills\doc-engineer"
-New-Item -ItemType Directory -Force -Path "$dst\references" | Out-Null
-Copy-Item .\SKILL.md, .\references\doc-engineer-agent-prompt.md -Destination $dst -Force
-Copy-Item .\references\doc-engineer-agent-prompt.md "$dst\references\" -Force
+New-Item -ItemType Directory -Force -Path $dst, "$dst\references" | Out-Null
+Copy-Item .\SKILL.md                                        "$dst\SKILL.md" -Force
+Copy-Item .\references\doc-engineer-agent-prompt.md         "$dst\references\doc-engineer-agent-prompt.md" -Force
 ```
 
 安装后，两处 `references/doc-engineer-agent-prompt.md`（仓库内 + 已安装）的 sha256
@@ -83,7 +85,15 @@ node verify.mjs
 
 1. `references/doc-engineer-agent-prompt.md` 与 `SKILL.md` 正文（剥掉 frontmatter 后）
    互为逐字节相同的字节序列，且 sha256 等于附件原文 sha256；
-2. `SKILL.md` 的 frontmatter 合法：含 kebab-case 的 `name` 与非空 `description`。
+2. `SKILL.md` 的 frontmatter 合法（拒绝式严格校验，零依赖）：以 `---` 起始并闭合、
+   结构为顶层 `key: value`、引号成对闭合且引号外无多余内容、无 tab 缩进、
+   无未知键（只接受 `name`、`description`、`whenToUse`、`metadata`、
+   `disable-model-invocation`、`user-invocable`）、`name` 为 kebab-case、
+   `description` 为非空字符串。
+
+frontmatter 校验是脚本内一个小解析器，刻意只覆盖本 skill 的 `key: 标量` 结构，
+是对 DSH 接受条件的**子集近似**而非通用 YAML 解析器：遇到更复杂的写法它报失败，
+而不是放水通过——宁可要求同步更新脚本，也不对 DSH 会静默丢弃的文件报 ok。
 
 也可以手工比对：
 

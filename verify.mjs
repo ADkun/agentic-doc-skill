@@ -5,7 +5,9 @@
  * 校验两件事：
  *  1. references/doc-engineer-agent-prompt.md 与 SKILL.md 的正文（剥掉 YAML frontmatter 后）
  *     互为逐字节相同的字节序列，且该字节序列的 sha256 == 附件原文 sha256；
- *  2. SKILL.md 的 frontmatter 合法：含 kebab-case 的 name 与非空 description。
+ *  2. SKILL.md 的 frontmatter 合法（**拒绝式**严格校验）：结构为 `key: 标量`、
+ *     含 kebab-case 的 name 与非空字符串 description、无未知键、无 tab 缩进、
+ *     引号必须成对闭合且引号外无多余尾随内容。
  *
  * 用法：node verify.mjs   （exit 0 = 通过，非 0 = 失败）
  *
@@ -145,49 +147,234 @@ if (bodyBuf === null) {
   }
 }
 
-/* ---------- 4. frontmatter 字段校验 ---------- */
-console.log('');
-console.log('4) SKILL.md frontmatter 字段');
+/* ---------- 4. frontmatter 字段校验（拒绝式严格校验，零依赖） ---------- */
+
+/*
+ * 下面这个小解析器**只**覆盖本 skill frontmatter 的形态：顶层 `key: 标量` 行。
+ * 它是对 DSH 接受条件的一个**子集近似**，不是通用 YAML 解析器：
+ *   - 不支持嵌套映射 / 序列 / 块标量（`|`、`>`）/ 锚点 / 流式集合 —— 一律拒绝；
+ *   - 对顶层键做了白名单（DSH 只接受这 6 个键），比通用 YAML "宽松接受" 更严；
+ *   - 对引号只做单双引号闭合检查 + 转义处理，不做完整 YAML 转义语义（如 `\ ` 外的
+ *     冷门转义、双引号内的行折叠）；
+ *   - 若是未来 frontmatter 变得更复杂，本脚本会**报失败**而不是放水通过 ——
+ *     这是刻意选择：宁可要求同步更新自检脚本，也不对 DSH 会静默丢弃的文件报 ok。
+ * 目的：DSH 用真实 YAML 解析器读取 frontmatter，本脚本必须能拒掉它拒掉的坏输入
+ * （典型：未闭合引号），因此校验必须是"拒绝式"的，不能是"长得像就通过"的正则。
+ */
+
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):(.*)$/;
+// DSH 接受的 frontmatter 键（dsh-skill-filesystem 的解析路径）。
+const ALLOWED_KEYS = new Set([
+  'name',
+  'description',
+  'whenToUse',
+  'metadata',
+  'disable-model-invocation',
+  'user-invocable',
+]);
+const INVOCATION_KEYS = new Set(['disable-model-invocation', 'user-invocable']);
+const BOOLEAN_SPELLINGS = new Set(['true', 'false', 'yes', 'no', 'on', 'off', '1', '0']);
+
+// YAML 普通标量中 ` #` 起始的是注释（引号内的 `#` 不受影响，见 parseScalar）。
+function stripYamlComment(s) {
+  const m = /(^|\s)#/.exec(s);
+  return m ? s.slice(0, m.index) : s;
+}
+
+function unquote(v) {
+  const quote = v[0];
+  const inner = v.slice(1, -1);
+  // 单引号内 `''` 表示一个字面单引号；双引号转义由 findClosingQuote 负责配对，
+  // 本子集近似不解码其转义序列（对 kebab-case 校验已足够严格）。
+  return quote === "'" ? inner.replace(/''/g, "'") : inner;
+}
+
+/**
+ * 解析 `key: 标量` 的标量部分。
+ * @returns {{ok: true, value: unknown} | {ok: false, error: string}}
+ */
+function parseScalar(key, rawValueWithComment, lineNo) {
+  const text = stripYamlComment(rawValueWithComment).trim();
+  if (text === '') {
+    // 空标量：本 skill 的字段全部要求非空；metadata 例外（映射键，本子集近似按空处理）。
+    if (key === 'metadata') return { ok: true, value: null };
+    return { ok: false, error: `第 ${lineNo} 行 \`${key}:\` 的值为空（要求非空标量）` };
+  }
+  const head = text[0];
+  if (head === '"' || head === "'") {
+    const quoteName = head === '"' ? '双引号' : '单引号';
+    const end = findClosingQuote(text, lineNo, quoteName);
+    if (end.ok === false) return { ok: false, error: end.error };
+    const after = text.slice(end.index + 1).trim();
+    if (after !== '') {
+      return {
+        ok: false,
+        error: `第 ${lineNo} 行 \`${key}:\` 的闭合${quoteName}之后有多余内容: "${after}"（不允许）`,
+      };
+    }
+    const value = unquote(text.slice(0, end.index + 1));
+    if (value === '') {
+      return { ok: false, error: `第 ${lineNo} 行 \`${key}:\` 的值为空字符串（要求非空）` };
+    }
+    return { ok: true, value };
+  }
+  if (text.includes('"') || text.includes("'")) {
+    return {
+      ok: false,
+      error: `第 ${lineNo} 行 \`${key}:\` 的未加引号标量中出现引号: "${text}"（引号必须整体包裹标量且成对闭合）`,
+    };
+  }
+  if (INVOCATION_KEYS.has(key) && !BOOLEAN_SPELLINGS.has(text.toLowerCase())) {
+    return {
+      ok: false,
+      error: `第 ${lineNo} 行 \`${key}:\` 必须是布尔值（true/false/yes/no/on/off/1/0），实际: "${text}"`,
+    };
+  }
+  return { ok: true, value: text };
+}
+
+function findClosingQuote(text, lineNo, quoteName) {
+  const quote = text[0];
+  for (let i = 1; i < text.length; i++) {
+    const ch = text[i];
+    if (quote === '"') {
+      if (ch === '\\') {
+        const next = text[i + 1];
+        if (next === undefined) {
+          return { ok: false, error: `第 ${lineNo} 行以孤立的反斜杠结尾（转义不完整）` };
+        }
+        i++; // 跳过被转义的字符（\" 不会提前闭合字符串）
+        continue;
+      }
+      if (ch === '"') return { ok: true, index: i };
+    } else if (ch === "'") {
+      if (text[i + 1] === "'") {
+        i++; // YAML 单引号内的 '' 表示一个字面单引号
+        continue;
+      }
+      return { ok: true, index: i };
+    }
+  }
+  return {
+    ok: false,
+    error: `第 ${lineNo} 行的${quoteName}未闭合（缺少配对的闭合引号）`,
+  };
+}
+
+/**
+ * 严格解析 frontmatter 文本。
+ * @returns {{ok: true, fields: Map<string, unknown>} | {ok: false, errors: string[]}}
+ */
+function parseFrontmatterStrict(text) {
+  const errors = [];
+  const fields = new Map();
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1; // frontmatter 内容内的行号（不含起始 `---`，与 DSH 的 line 号一致）
+    const raw = lines[i].endsWith('\r') ? lines[i].slice(0, -1) : lines[i];
+    if (raw.trim() === '') continue;
+    if (raw.includes('\t')) {
+      errors.push(`第 ${lineNo} 行含 tab 字符（frontmatter 的缩进与分隔必须是空格）`);
+      continue;
+    }
+    if (/^[ \u3000]/.test(raw) || raw.startsWith('-')) {
+      errors.push(
+        `第 ${lineNo} 行不是顶层 \`key: value\` 结构: "${raw}"（不支持缩进/嵌套/序列/块标量）`
+      );
+      continue;
+    }
+    const m = KEY_RE.exec(raw);
+    if (!m) {
+      errors.push(`第 ${lineNo} 行不符合 \`key: value\` 结构: "${raw}"`);
+      continue;
+    }
+    const key = m[1];
+    if (!ALLOWED_KEYS.has(key)) {
+      errors.push(
+        `第 ${lineNo} 行出现未知键 \`${key}\`（DSH 只接受: ${[...ALLOWED_KEYS].join(', ')}）`
+      );
+      continue;
+    }
+    if (fields.has(key)) {
+      errors.push(`第 ${lineNo} 行重复定义键 \`${key}\``);
+      continue;
+    }
+    const parsed = parseScalar(key, m[2], lineNo);
+    if (parsed.ok === false) {
+      errors.push(parsed.error);
+      continue;
+    }
+    fields.set(key, parsed.value);
+  }
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, fields };
+}
+
+console.log('');
+console.log('4) SKILL.md frontmatter 字段（拒绝式严格校验）');
+console.log('   注：本校验是 DSH 接受条件的子集近似，非通用 YAML 解析器（详见 verify.mjs 注释）。');
 if (frontmatterText === null) {
   fail('无 frontmatter 可校验');
 } else {
-  const fieldRe = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/;
-  const fields = new Map();
-  for (const raw of frontmatterText.split('\n')) {
-    const m = fieldRe.exec(raw);
-    if (m) fields.set(m[1], m[2].trim());
-  }
-
-  const name = fields.get('name');
-  if (name === undefined || name === '') {
-    fail('frontmatter 缺少必填字段 `name`');
-  } else if (!KEBAB.test(name)) {
-    fail(`\`name\` 不是 kebab-case: "${name}"`);
+  const parsed = parseFrontmatterStrict(frontmatterText);
+  if (parsed.ok === false) {
+    // 结构层面已非法：逐条列出，并直接对这些坏输入报失败（拒绝式，绝不放水）。
+    for (const e of parsed.errors) {
+      fail(`frontmatter 非法：${e}`);
+    }
   } else {
-    ok(`name = "${name}"（kebab-case 合法）`);
-  }
+    const fields = parsed.fields;
 
-  const description = fields.get('description');
-  if (description === undefined || description === '') {
-    fail('frontmatter 缺少必填字段 `description`');
-  } else {
-    ok(`description 存在（${description.length} 字符）`);
-  }
+    const name = fields.get('name');
+    if (name === undefined) {
+      fail('frontmatter 缺少必填字段 `name`');
+    } else if (typeof name !== 'string' || name === '') {
+      fail(`\`name\` 必须是非空字符串，实际: ${JSON.stringify(name)}`);
+    } else if (!KEBAB.test(name)) {
+      fail(`\`name\` 不是 kebab-case（^[a-z0-9]+(-[a-z0-9]+)*$）: "${name}"`);
+    } else {
+      ok(`name = "${name}"（kebab-case 合法）`);
+    }
 
-  const whenToUse = fields.get('whenToUse');
-  if (whenToUse === undefined) {
-    ok('whenToUse 未设置（可选字段，允许）');
-  } else if (whenToUse === '') {
-    fail('`whenToUse` 存在但为空');
-  } else {
-    ok(`whenToUse 存在（${whenToUse.length} 字符）`);
-  }
+    const description = fields.get('description');
+    if (description === undefined) {
+      fail('frontmatter 缺少必填字段 `description`');
+    } else if (typeof description !== 'string' || description === '') {
+      fail(`\`description\` 必须是非空字符串，实际: ${JSON.stringify(description)}`);
+    } else {
+      ok(`description 存在（${description.length} 字符）`);
+    }
 
-  const unknown = [...fields.keys()].filter(
-    (k) => !['name', 'description', 'whenToUse'].includes(k)
-  );
-  if (unknown.length) notes.push(`frontmatter 含额外字段（DSH 规范未定义，可能被忽略）: ${unknown.join(', ')}`);
+    const whenToUse = fields.get('whenToUse');
+    if (whenToUse === undefined) {
+      ok('whenToUse 未设置（可选字段，允许）');
+    } else if (typeof whenToUse !== 'string' || whenToUse === '') {
+      fail(`\`whenToUse\` 存在但不是非空字符串，实际: ${JSON.stringify(whenToUse)}`);
+    } else {
+      ok(`whenToUse 存在（${whenToUse.length} 字符）`);
+    }
+
+    for (const key of INVOCATION_KEYS) {
+      if (!fields.has(key)) continue;
+      const v = fields.get(key);
+      if (typeof v === 'string' && BOOLEAN_SPELLINGS.has(v.toLowerCase())) {
+        ok(`${key} = ${v}（布尔拼写合法）`);
+      } else if (v === null) {
+        notes.push(`\`${key}\` 存在但为空值（本子集近似按"未设置"处理）`);
+      } else {
+        fail(`\`${key}\` 不是可接受的布尔值: ${JSON.stringify(v)}`);
+      }
+    }
+
+    if (fields.has('metadata')) {
+      notes.push('`metadata` 存在（映射键；本子集近似不解析其内部结构）');
+    }
+
+    // 未知键在结构校验阶段已被拒绝；这里只是兜底确认白名单闭合。
+    const unknown = [...fields.keys()].filter((k) => !ALLOWED_KEYS.has(k));
+    if (unknown.length) fail(`frontmatter 含未知键: ${unknown.join(', ')}`);
+  }
 }
 
 /* ---------- 结论 ---------- */
