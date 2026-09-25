@@ -1,0 +1,12 @@
+# 逐字节保真：对所有文件禁用 git 的任何行尾/编码转换。
+#
+# 背景：本仓库的核心约束是 references/doc-engineer-agent-prompt.md 与
+# SKILL.md 正文必须逐字节不变（7562 字节、LF、无 BOM）。
+# 在 core.autocrlf=true 的 Windows 机器上，若没有本文件，clone 时工作
+# 副本会被 checkout 成 CRLF，导致 `node verify.mjs` 失败。
+#
+# `-text` 表示"此文件不是文本"，git 因此不做任何 EOL 规范化：
+# 存入 blob 是什么字节，checkout 出来就是什么字节。任何平台一致。
+#
+# 注意：不要写成 `text=auto` 或 `* text` —— 那仍会触发规范化转换。
+* -text
