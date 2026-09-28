@@ -2,17 +2,21 @@
 /**
  * verify.mjs — 零依赖自检脚本
  *
- * 校验两件事：
- *  1. references/doc-engineer-agent-prompt.md 与 SKILL.md 的正文（剥掉 YAML frontmatter 后）
- *     互为逐字节相同的字节序列，且该字节序列的 sha256 == 附件原文 sha256；
- *  2. SKILL.md 的 frontmatter 合法（**拒绝式**严格校验）：结构为 `key: 标量`、
- *     含 kebab-case 的 name 与非空字符串 description、无未知键、无 tab 缩进、
- *     引号必须成对闭合且引号外无多余尾随内容。
+ * 校验四件事：
+ *  1. SKILL.md 的第一个 `---` frontmatter 块之后的正文，与
+ *     references/doc-engineer-agent-prompt.md 全文**互为逐字节相同的字节序列**
+ *     （动态一致性校验：不再有钉死的 sha256 常量，改正文只需同步两副本）；
+ *  2. 两副本均为无 BOM 的 UTF-8 且行尾为 LF（与 .gitattributes 的 `* -text` 逐字节保真约定一致）；
+ *  3. SKILL.md 的 frontmatter 合法（**拒绝式**严格校验）：结构为 `key: 标量`、
+ *     `name` 精确等于 `doc-engineer`、`description`/`whenToUse` 为非空字符串、
+ *     字段白名单仅 name/description/whenToUse、无 tab 缩进、
+ *     引号必须成对闭合且引号外无多余尾随内容；
+ *  4. 正文一级标题（`# ` 开头、排除 ``` 围栏内）序列等于定稿章节清单。
  *
  * 用法：node verify.mjs   （exit 0 = 通过，非 0 = 失败）
  *
- * 注意：SKILL.md 的 frontmatter 块本身不计入 sha256，
- *       以 references/doc-engineer-agent-prompt.md 作为基准（它的 sha256 即附件 sha256）。
+ * 注意：SKILL.md 的 frontmatter 块本身不参与一致性比对，
+ *       基准 = references/doc-engineer-agent-prompt.md 全文。
  */
 
 import { readFileSync } from 'node:fs';
@@ -20,12 +24,28 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const EXPECTED_SHA256 =
-  'ee6d1864f8ff371b9420a06bff077c7be16bbd4de6412ca115aad0792c0886d5';
-
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const REF_PATH = join(ROOT, 'references', 'doc-engineer-agent-prompt.md');
 const SKILL_PATH = join(ROOT, 'SKILL.md');
+
+/** 定稿正文的一级标题清单（顺序即期望顺序；围栏代码块内的 `#` 不计入）。 */
+const EXPECTED_H1 = [
+  '# 角色',
+  '# 定位（与 plan/spec 相反）',
+  '# 设计哲学（不可违背）',
+  '# 工作方式（loop 工作法）',
+  '# 过程与状态文件（临时工作目录）',
+  '# design.md 写作规范',
+  '# AGENTS.md 维护规范（最高优先级文档）',
+  '# 其他文档规范',
+  '# 人类扫读契约',
+  '# 质量红线清单（交付前逐条自检；载体标注：[机检]=脚本可判，[评]=对抗评审可判，[人]=登记 pending.md）',
+  '# 反模式（出现即返工）',
+];
+
+/** frontmatter 字段白名单（比 DSH 接受的键更严：本 skill 只允许这三键）。 */
+const ALLOWED_KEYS = new Set(['name', 'description', 'whenToUse']);
+const EXPECTED_NAME = 'doc-engineer';
 
 const failures = [];
 const notes = [];
@@ -40,59 +60,64 @@ function fail(msg) {
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
+function die(msg) {
+  fail(msg);
+  console.log('');
+  console.log(`RESULT: FAIL (${failures.length} 项失败)`);
+  process.exit(1);
+}
 
 console.log('verify.mjs — DSH skill "doc-engineer" 自检');
 console.log(`  root: ${ROOT}`);
 console.log('');
 
-/* ---------- 1. 读取 references 基准 ---------- */
-console.log('1) references/doc-engineer-agent-prompt.md');
+/* ---------- 1. 读取两个副本 ---------- */
+console.log('1) 读取 SKILL.md 与 references 基准');
 let refBuf;
 try {
   refBuf = readFileSync(REF_PATH);
 } catch (err) {
-  fail(`无法读取 ${REF_PATH}: ${err.message}`);
-  console.log('');
-  console.log(`RESULT: FAIL (${failures.length} 项失败)`);
-  process.exit(1);
+  die(`无法读取 ${REF_PATH}: ${err.message}`);
 }
-const refSha = sha256(refBuf);
-ok(`存在，${refBuf.length} 字节`);
-ok(`sha256 = ${refSha}`);
-if (refSha === EXPECTED_SHA256) {
-  ok(`sha256 等于附件原文 sha256 (${EXPECTED_SHA256})`);
-} else {
-  fail(`sha256 与附件原文不一致：期望 ${EXPECTED_SHA256}，实际 ${refSha}`);
-}
-
-/* ---------- 2. 解析 SKILL.md，剥离 frontmatter ---------- */
-console.log('');
-console.log('2) SKILL.md');
 let skillBuf;
 try {
   skillBuf = readFileSync(SKILL_PATH);
 } catch (err) {
-  fail(`无法读取 ${SKILL_PATH}: ${err.message}`);
-  console.log('');
-  console.log(`RESULT: FAIL (${failures.length} 项失败)`);
-  process.exit(1);
+  die(`无法读取 ${SKILL_PATH}: ${err.message}`);
 }
-ok(`存在，${skillBuf.length} 字节`);
+ok(`references/doc-engineer-agent-prompt.md 存在，${refBuf.length} 字节，sha256 = ${sha256(refBuf)}`);
+ok(`SKILL.md 存在，${skillBuf.length} 字节，sha256 = ${sha256(skillBuf)}`);
 
-let bodyBuf = null;
-let frontmatterText = null;
-
-if (skillBuf[0] === 0xef && skillBuf[1] === 0xbb && skillBuf[2] === 0xbf) {
-  fail('SKILL.md 以 UTF-8 BOM 开头（frontmatter 可能因此非法，要求无 BOM）');
-} else {
-  ok('无 UTF-8 BOM');
+/* ---------- 2. 编码 / 行尾（逐字节保真前提） ---------- */
+console.log('');
+console.log('2) 编码与行尾（无 BOM + LF）');
+function checkBytesNoBom(name, buf) {
+  if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    fail(`${name} 以 UTF-8 BOM 开头（要求无 BOM）`);
+  } else {
+    ok(`${name} 无 UTF-8 BOM`);
+  }
+  let cr = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0d) cr++;
+  if (cr > 0) {
+    fail(`${name} 含 ${cr} 个 CR 字节（要求纯 LF；.gitattributes 已用 \`* -text\` 禁止行尾转换）`);
+  } else {
+    ok(`${name} 行尾为纯 LF（无 CR 字节）`);
+  }
 }
+checkBytesNoBom('SKILL.md', skillBuf);
+checkBytesNoBom('references/doc-engineer-agent-prompt.md', refBuf);
 
+/* ---------- 3. 解析 SKILL.md，剥离 frontmatter ---------- */
 const skillText = skillBuf.toString('utf8');
 const lines = skillText.split('\n');
 const stripCr = (s) => (s.endsWith('\r') ? s.slice(0, -1) : s);
 
-// frontmatter 必须以第一行的 `---` 开始
+let bodyBuf = null;
+let frontmatterText = null;
+
+console.log('');
+console.log('3) SKILL.md frontmatter 块定位与正文剥离');
 if (lines.length > 0 && stripCr(lines[0]) === '---') {
   let endIdx = -1;
   for (let i = 1; i < lines.length; i++) {
@@ -118,42 +143,75 @@ if (lines.length > 0 && stripCr(lines[0]) === '---') {
   fail('SKILL.md 未以 `---` 起始的 YAML frontmatter 开头');
 }
 
-/* ---------- 3. 正文与 references 逐字节比对 ---------- */
+/* ---------- 4. 正文与 references 逐字节一致性（动态校验，无钉死哈希） ---------- */
 console.log('');
-console.log('3) SKILL.md 正文 vs references 基准（逐字节）');
+console.log('4) SKILL.md 正文 vs references 全文（逐字节一致性，动态）');
 if (bodyBuf === null) {
   fail('无法剥离 frontmatter，正文比对跳过');
 } else {
-  const bodySha = sha256(bodyBuf);
-  ok(`正文 ${bodyBuf.length} 字节，sha256 = ${bodySha}`);
+  ok(`正文 ${bodyBuf.length} 字节，sha256 = ${sha256(bodyBuf)}（信息值，不作期望）`);
   if (bodyBuf.equals(refBuf)) {
-    ok('正文与 references/doc-engineer-agent-prompt.md 逐字节相等');
+    ok(`正文与 references/doc-engineer-agent-prompt.md 逐字节相等（${refBuf.length} 字节）`);
   } else {
     fail(
-      `正文与 references 基准不相等（正文 ${bodyBuf.length} 字节 vs 基准 ${refBuf.length} 字节）`
+      `正文与 references 基准不逐字节相等（正文 ${bodyBuf.length} 字节 vs 基准 ${refBuf.length} 字节）——两副本必须同步更新`
     );
     const n = Math.min(bodyBuf.length, refBuf.length);
+    let firstDiff = -1;
     for (let i = 0; i < n; i++) {
       if (bodyBuf[i] !== refBuf[i]) {
-        notes.push(`首个差异位于偏移 ${i}: 正文 0x${bodyBuf[i].toString(16)} vs 基准 0x${refBuf[i].toString(16)}`);
+        firstDiff = i;
         break;
       }
     }
-  }
-  if (bodySha === EXPECTED_SHA256) {
-    ok(`正文 sha256 等于附件原文 sha256`);
-  } else {
-    fail(`正文 sha256 与附件原文不一致：期望 ${EXPECTED_SHA256}，实际 ${bodySha}`);
+    if (firstDiff === -1) firstDiff = n;
+    notes.push(
+      `首个差异位于偏移 ${firstDiff}` +
+        (firstDiff < Math.min(bodyBuf.length, refBuf.length)
+          ? `: 正文 0x${bodyBuf[firstDiff].toString(16)} vs 基准 0x${refBuf[firstDiff].toString(16)}`
+          : '（一处是另一处的前缀，长度不同）')
+    );
   }
 }
 
-/* ---------- 4. frontmatter 字段校验（拒绝式严格校验，零依赖） ---------- */
+/* ---------- 5. 章节清单校验（一级标题序列，排除围栏代码块） ---------- */
+console.log('');
+console.log('5) 正文章节清单（一级标题序列）');
+if (bodyBuf === null) {
+  fail('无正文可校验章节清单');
+} else {
+  const bodyLines = bodyBuf.toString('utf8').split('\n').map(stripCr);
+  const h1 = [];
+  let inFence = false;
+  for (const l of bodyLines) {
+    if (/^(`{3,}|~{3,})/.test(l)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (/^# \S/.test(l)) h1.push(l);
+  }
+  const same = h1.length === EXPECTED_H1.length && h1.every((v, i) => v === EXPECTED_H1[i]);
+  if (same) {
+    ok(`一级标题 ${h1.length} 节，与定稿章节清单逐节一致`);
+  } else {
+    fail('一级标题序列与定稿章节清单不一致（改了章节名/增删章节须同步 EXPECTED_H1）');
+    for (let i = 0; i < Math.max(h1.length, EXPECTED_H1.length); i++) {
+      const a = h1[i];
+      const b = EXPECTED_H1[i];
+      if (a !== b) notes.push(`第 ${i + 1} 节：实际 ${JSON.stringify(a ?? null)} vs 期望 ${JSON.stringify(b ?? null)}`);
+    }
+  }
+}
+
+/* ---------- 6. frontmatter 字段校验（拒绝式严格校验，零依赖） ---------- */
 
 /*
  * 下面这个小解析器**只**覆盖本 skill frontmatter 的形态：顶层 `key: 标量` 行。
  * 它是对 DSH 接受条件的一个**子集近似**，不是通用 YAML 解析器：
  *   - 不支持嵌套映射 / 序列 / 块标量（`|`、`>`）/ 锚点 / 流式集合 —— 一律拒绝；
- *   - 对顶层键做了白名单（DSH 只接受这 6 个键），比通用 YAML "宽松接受" 更严；
+ *   - 对顶层键做了白名单（本 skill 只允许 name / description / whenToUse），
+ *     比 DSH 自身接受的键集更严；
  *   - 对引号只做单双引号闭合检查 + 转义处理，不做完整 YAML 转义语义（如 `\ ` 外的
  *     冷门转义、双引号内的行折叠）；
  *   - 若是未来 frontmatter 变得更复杂，本脚本会**报失败**而不是放水通过 ——
@@ -164,17 +222,6 @@ if (bodyBuf === null) {
 
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):(.*)$/;
-// DSH 接受的 frontmatter 键（dsh-skill-filesystem 的解析路径）。
-const ALLOWED_KEYS = new Set([
-  'name',
-  'description',
-  'whenToUse',
-  'metadata',
-  'disable-model-invocation',
-  'user-invocable',
-]);
-const INVOCATION_KEYS = new Set(['disable-model-invocation', 'user-invocable']);
-const BOOLEAN_SPELLINGS = new Set(['true', 'false', 'yes', 'no', 'on', 'off', '1', '0']);
 
 // YAML 普通标量中 ` #` 起始的是注释（引号内的 `#` 不受影响，见 parseScalar）。
 function stripYamlComment(s) {
@@ -197,9 +244,7 @@ function unquote(v) {
 function parseScalar(key, rawValueWithComment, lineNo) {
   const text = stripYamlComment(rawValueWithComment).trim();
   if (text === '') {
-    // 空标量：本 skill 的字段全部要求非空；metadata 例外（映射键，本子集近似按空处理）。
-    if (key === 'metadata') return { ok: true, value: null };
-    return { ok: false, error: `第 ${lineNo} 行 \`${key}:\` 的值为空（要求非空标量）` };
+    return { ok: false, error: `第 ${lineNo} 行 \`${key}:\` 的值为空（本 skill 三字段均要求非空标量）` };
   }
   const head = text[0];
   if (head === '"' || head === "'") {
@@ -223,12 +268,6 @@ function parseScalar(key, rawValueWithComment, lineNo) {
     return {
       ok: false,
       error: `第 ${lineNo} 行 \`${key}:\` 的未加引号标量中出现引号: "${text}"（引号必须整体包裹标量且成对闭合）`,
-    };
-  }
-  if (INVOCATION_KEYS.has(key) && !BOOLEAN_SPELLINGS.has(text.toLowerCase())) {
-    return {
-      ok: false,
-      error: `第 ${lineNo} 行 \`${key}:\` 必须是布尔值（true/false/yes/no/on/off/1/0），实际: "${text}"`,
     };
   }
   return { ok: true, value: text };
@@ -269,10 +308,10 @@ function findClosingQuote(text, lineNo, quoteName) {
 function parseFrontmatterStrict(text) {
   const errors = [];
   const fields = new Map();
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
+  const fmLines = text.split('\n');
+  for (let i = 0; i < fmLines.length; i++) {
     const lineNo = i + 1; // frontmatter 内容内的行号（不含起始 `---`，与 DSH 的 line 号一致）
-    const raw = lines[i].endsWith('\r') ? lines[i].slice(0, -1) : lines[i];
+    const raw = fmLines[i].endsWith('\r') ? fmLines[i].slice(0, -1) : fmLines[i];
     if (raw.trim() === '') continue;
     if (raw.includes('\t')) {
       errors.push(`第 ${lineNo} 行含 tab 字符（frontmatter 的缩进与分隔必须是空格）`);
@@ -292,7 +331,7 @@ function parseFrontmatterStrict(text) {
     const key = m[1];
     if (!ALLOWED_KEYS.has(key)) {
       errors.push(
-        `第 ${lineNo} 行出现未知键 \`${key}\`（DSH 只接受: ${[...ALLOWED_KEYS].join(', ')}）`
+        `第 ${lineNo} 行出现非白名单键 \`${key}\`（本 skill 只接受: ${[...ALLOWED_KEYS].join(', ')}）`
       );
       continue;
     }
@@ -312,7 +351,7 @@ function parseFrontmatterStrict(text) {
 }
 
 console.log('');
-console.log('4) SKILL.md frontmatter 字段（拒绝式严格校验）');
+console.log('6) SKILL.md frontmatter 字段（拒绝式严格校验）');
 console.log('   注：本校验是 DSH 接受条件的子集近似，非通用 YAML 解析器（详见 verify.mjs 注释）。');
 if (frontmatterText === null) {
   fail('无 frontmatter 可校验');
@@ -333,8 +372,10 @@ if (frontmatterText === null) {
       fail(`\`name\` 必须是非空字符串，实际: ${JSON.stringify(name)}`);
     } else if (!KEBAB.test(name)) {
       fail(`\`name\` 不是 kebab-case（^[a-z0-9]+(-[a-z0-9]+)*$）: "${name}"`);
+    } else if (name !== EXPECTED_NAME) {
+      fail(`\`name\` 必须精确等于 "${EXPECTED_NAME}"，实际: "${name}"`);
     } else {
-      ok(`name = "${name}"（kebab-case 合法）`);
+      ok(`name = "${name}"（精确匹配，kebab-case 合法）`);
     }
 
     const description = fields.get('description');
@@ -348,32 +389,16 @@ if (frontmatterText === null) {
 
     const whenToUse = fields.get('whenToUse');
     if (whenToUse === undefined) {
-      ok('whenToUse 未设置（可选字段，允许）');
+      fail('frontmatter 缺少 `whenToUse`（本 skill 定稿三字段之一，要求存在且非空）');
     } else if (typeof whenToUse !== 'string' || whenToUse === '') {
-      fail(`\`whenToUse\` 存在但不是非空字符串，实际: ${JSON.stringify(whenToUse)}`);
+      fail(`\`whenToUse\` 必须是非空字符串，实际: ${JSON.stringify(whenToUse)}`);
     } else {
       ok(`whenToUse 存在（${whenToUse.length} 字符）`);
     }
 
-    for (const key of INVOCATION_KEYS) {
-      if (!fields.has(key)) continue;
-      const v = fields.get(key);
-      if (typeof v === 'string' && BOOLEAN_SPELLINGS.has(v.toLowerCase())) {
-        ok(`${key} = ${v}（布尔拼写合法）`);
-      } else if (v === null) {
-        notes.push(`\`${key}\` 存在但为空值（本子集近似按"未设置"处理）`);
-      } else {
-        fail(`\`${key}\` 不是可接受的布尔值: ${JSON.stringify(v)}`);
-      }
-    }
-
-    if (fields.has('metadata')) {
-      notes.push('`metadata` 存在（映射键；本子集近似不解析其内部结构）');
-    }
-
-    // 未知键在结构校验阶段已被拒绝；这里只是兜底确认白名单闭合。
+    // 非白名单键在结构校验阶段已被拒绝；这里只是兜底确认白名单闭合。
     const unknown = [...fields.keys()].filter((k) => !ALLOWED_KEYS.has(k));
-    if (unknown.length) fail(`frontmatter 含未知键: ${unknown.join(', ')}`);
+    if (unknown.length) fail(`frontmatter 含非白名单键: ${unknown.join(', ')}`);
   }
 }
 
@@ -386,7 +411,7 @@ if (notes.length) {
 
 console.log('');
 if (failures.length === 0) {
-  console.log('RESULT: PASS — 正文逐字节一致，sha256 匹配，frontmatter 合法');
+  console.log('RESULT: PASS — 正文与 references 逐字节一致；编码/行尾合规；章节清单匹配；frontmatter 合法');
   process.exit(0);
 } else {
   console.log(`RESULT: FAIL — ${failures.length} 项失败`);
