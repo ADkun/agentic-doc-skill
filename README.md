@@ -16,7 +16,8 @@ agentic-doc-skill/
 │   └── doc-engineer-agent-prompt.md        # 角色规范正文副本（与 SKILL.md 正文逐字节一致）
 ├── README.md                               # 本文件
 ├── verify.mjs                              # 零依赖自检脚本
-└── .gitignore
+├── .gitignore
+└── .gitattributes                          # `* -text`：禁用行尾转换，保证两副本跨平台逐字节一致
 ```
 
 ### 关于 `SKILL.md` 与 `references/` 的关系
