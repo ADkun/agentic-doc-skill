@@ -11,7 +11,10 @@
  *     `name` 精确等于 `doc-engineer`、`description`/`whenToUse` 为非空字符串、
  *     字段白名单仅 name/description/whenToUse、无 tab 缩进、
  *     引号必须成对闭合且引号外无多余尾随内容；
- *  4. 正文一级标题（`# ` 开头、排除 ``` 围栏内）序列等于定稿章节清单。
+ *  4. 正文一级标题（`# ` 开头、排除 ``` 围栏内）序列等于定稿章节清单；
+ *  5. DSH 目录渲染契约（0.2.0 实测）：模型可见的只有一行 `` - `name`: description ``，
+ *     `description` 必须 ≤ catalogDescriptionMaxLength（DSH 默认 500，超长会被截成 `...`），
+ *     且必须以触发句开头——`whenToUse` 不进入模型可见文本，路由只能靠 `description`。
  *
  * 用法：node verify.mjs   （exit 0 = 通过，非 0 = 失败）
  *
@@ -48,6 +51,25 @@ const EXPECTED_H1 = [
 /** frontmatter 字段白名单（比 DSH 接受的键更严：本 skill 只允许这三键）。 */
 const ALLOWED_KEYS = new Set(['name', 'description', 'whenToUse']);
 const EXPECTED_NAME = 'doc-engineer';
+
+/**
+ * DSH 把 skill 交给模型的唯一通道是「技能目录」里的一行：`- \`name\`: description`。
+ * 该目录**不渲染 whenToUse**（dsh-tool-skill：「The catalog omits `whenToUse`, source,
+ * and provider metadata」，加载后的正文同样不渲染它），且 `description` 超过
+ * `catalogDescriptionMaxLength`（DSH 默认 500，最小 3）会被截成 `${slice(0, max-3)}...`。
+ * 因此：路由触发句必须写在 `description` 里并放在开头，且总长要留在 500 字符内，
+ * 否则模型看到的目录行会丢字——skill 会像"不存在"一样不再被触发。
+ */
+const CATALOG_DESCRIPTION_MAX_LENGTH = 500;
+const DESCRIPTION_TRIGGER_HEAD = '当用户要求';
+
+/**
+ * DSH 0.2.0 的 invocation 键写作 kebab-case（`disable-model-invocation`/
+ * `user-invocable`）；旧 camelCase 写法会让 dsh-skill-filesystem 抛错并**丢弃整个
+ * skill 文件**（`frontmatter field "X" is unsupported; use "Y"`）——这正是
+ * 「升级后 skill 没了」最隐蔽的一种成因，所以这里显式点名。
+ */
+const LEGACY_INVOCATION_KEYS = new Set(['disableModelInvocation', 'modelInvocable', 'userInvocable']);
 
 const failures = [];
 const notes = [];
@@ -332,8 +354,11 @@ function parseFrontmatterStrict(text) {
     }
     const key = m[1];
     if (!ALLOWED_KEYS.has(key)) {
+      const legacy = LEGACY_INVOCATION_KEYS.has(key)
+        ? `；\`${key}\` 是 DSH 已废弃的 invocation 写法，会让 dsh-skill-filesystem 抛错并丢弃整个 skill 文件（skill 等于消失），应改用 kebab-case 键`
+        : '';
       errors.push(
-        `第 ${lineNo} 行出现非白名单键 \`${key}\`（本 skill 只接受: ${[...ALLOWED_KEYS].join(', ')}）`
+        `第 ${lineNo} 行出现非白名单键 \`${key}\`（本 skill 只接受: ${[...ALLOWED_KEYS].join(', ')}）${legacy}`
       );
       continue;
     }
@@ -387,6 +412,24 @@ if (frontmatterText === null) {
       fail(`\`description\` 必须是非空字符串，实际: ${JSON.stringify(description)}`);
     } else {
       ok(`description 存在（${description.length} 字符）`);
+      const descChars = [...description].length;
+      if (descChars > CATALOG_DESCRIPTION_MAX_LENGTH) {
+        fail(
+          `\`description\` 为 ${descChars} 字符，超过 DSH catalogDescriptionMaxLength 默认值 ` +
+            `${CATALOG_DESCRIPTION_MAX_LENGTH}：技能目录行会被截断，路由文本丢字` +
+            `（把它压到 ${CATALOG_DESCRIPTION_MAX_LENGTH} 字符内，或显式提高 DSH 侧上限）`
+        );
+      } else {
+        ok(`description ${descChars} 字符 ≤ ${CATALOG_DESCRIPTION_MAX_LENGTH}（目录行不会被截断）`);
+      }
+      if (!description.startsWith(DESCRIPTION_TRIGGER_HEAD)) {
+        fail(
+          `\`description\` 未以触发句开头（要求以 "${DESCRIPTION_TRIGGER_HEAD}" 开头）：` +
+            'DSH 目录只渲染 name + description，whenToUse 不参与模型可见文本，触发句必须落在 description 开头'
+        );
+      } else {
+        ok(`description 以触发句开头（"${DESCRIPTION_TRIGGER_HEAD}…"），路由不依赖 whenToUse`);
+      }
     }
 
     const whenToUse = fields.get('whenToUse');
@@ -396,6 +439,10 @@ if (frontmatterText === null) {
       fail(`\`whenToUse\` 必须是非空字符串，实际: ${JSON.stringify(whenToUse)}`);
     } else {
       ok(`whenToUse 存在（${whenToUse.length} 字符）`);
+      notes.push(
+        'whenToUse 在 DSH 里是 provider 元数据：技能目录只渲染 name + description，加载后的正文也不渲染它；' +
+          '保留它是为了向后兼容（万一后续版本开始渲染），路由能力必须由 description 承担。'
+      );
     }
 
     // 非白名单键在结构校验阶段已被拒绝；这里只是兜底确认白名单闭合。

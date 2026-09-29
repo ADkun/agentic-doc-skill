@@ -114,7 +114,10 @@ node verify.mjs
 4. `SKILL.md` 的 frontmatter 合法（拒绝式严格校验，零依赖）：以 `---` 起始并闭合、
    结构为顶层 `key: value`、引号成对闭合且引号外无多余内容、无 tab 缩进、
    无未知键（**白名单只接受 `name`、`description`、`whenToUse`**，比 DSH 允许的键集更严）、
-   `name` 精确等于 `doc-engineer` 且为 kebab-case、`description` 与 `whenToUse` 均为非空字符串。
+   `name` 精确等于 `doc-engineer` 且为 kebab-case、`description` 与 `whenToUse` 均为非空字符串；
+5. DSH 目录渲染契约（见「兼容性核查（DSH 0.2.0）」）：`description` ≤ 500 字符
+   （DSH `catalogDescriptionMaxLength` 默认值）且以触发句 `当用户要求` 开头——
+   模型可见的目录行只有 `` - `name`: description `` 这一行。
 
 frontmatter 校验是脚本内一个小解析器，刻意只覆盖本 skill 的 `key: 标量` 结构，
 是对 DSH 接受条件的**子集近似**而非通用 YAML 解析器：遇到更复杂的写法它报失败，
@@ -128,6 +131,28 @@ Get-FileHash -Algorithm SHA256 .\SKILL.md, .\references\doc-engineer-agent-promp
 
 （`SKILL.md` 含 frontmatter，与 `references/` 的哈希本就不同；要比对的是
 "剥掉 frontmatter 后的正文"与 `references/` 全文，这一步交给 `node verify.mjs` 做。）
+
+## 兼容性核查（DSH 0.2.0）
+
+本节记录 2026-09-30 在本机 DSH 0.2.0-rc.2 上实测的 skill 装载契约，用于排查
+「skill 明明装了，会话里却看不到 / 不再被触发」这类问题。结论先说：**0.2.0 没有改动 skill 子系统**
+（`dsh-skill`、`dsh-skill-filesystem`、`dsh-tool-skill` 三个包与 0.1.7-rc.2 逐字节相同，
+四个内置 preset 也逐字节相同），本 skill 的文件也未被升级触碰——看不到 skill 只会是下面四个
+装载条件之一不满足：
+
+| 条件 | DSH 0.2.0 的实际行为 | 本 skill 的现状 |
+| --- | --- | --- |
+| 文件位置 | 目录包只认 `<skill 根>\<name>\SKILL.md`，且只扫一层；嵌在 `references/` 等子目录里的 `SKILL.md` **不会被发现** | 装在 `%USERPROFILE%\.dsh\skills\doc-engineer\SKILL.md` |
+| frontmatter | 必须有 `name` + `description`；可选 `whenToUse`/`metadata`/`disable-model-invocation`/`user-invocable`。出现旧写法 `disableModelInvocation`/`modelInvocable`/`userInvocable` 时 dsh-skill-filesystem **丢弃整个文件**（skill 等于消失） | 只用 `name`/`description`/`whenToUse`；`verify.mjs` 用白名单拒绝其它任何键 |
+| 模型可见文本 | 目录只渲染一行 `` - `name`: description ``；**`whenToUse` 既不进目录、加载正文后也不渲染**；`description` 超过 `catalogDescriptionMaxLength`（默认 500）会被截成 `...` | 触发句写在 `description` 开头，总长 < 500 字符 |
+| 会话作用域 | skill 目录由该会话组成（agent preset）里挂载的 `skill-filesystem` 决定：组成里没有 skill 行的会话看不到任何 skill；子智能体会话（`delegationDepth ≥ 1`）**不发布**技能目录 | 主会话（`adg`/`cordis`/`standard` preset）都能看到 |
+
+排查顺序（本机实测有效）：
+
+1. **文件在不在、是否逐字节同步**：比对安装副本与仓库源文件的 `Get-FileHash`（见上一节）；
+2. **frontmatter 合不合契约**：`node verify.mjs`（不合契约会被 DSH 静默跳过）；
+3. **该 profile 的组成里有没有 skill 行**：`dsh --profile <name> --dump-config | Select-String skill`；
+4. **该会话到底发过没有**：在会话记录里搜 `available_skills`；**子智能体会话不会出现该目录行，这是设计如此，不是 skill 丢失**。
 
 ## 许可证 / 来源
 

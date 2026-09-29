@@ -1,6 +1,6 @@
 ---
 name: doc-engineer
-description: 项目「文档工程师」角色规范：文档首先写给人看——清晰、可审核是第一目标，其次才是不牺牲可读性的零上下文智能体施工认知系统（AGENTS.md、design.md、testing-guide.md、_index.md）。过程件（changelog/handoff/待决清单/工作稿）隔离于 git 排除的临时工作目录，版本区只留最终真相。引用形式（同仓库/跨仓库的路径、链接与 ref 写法）按专用规范选型。当用户要求撰写/维护/评审项目设计文档、模块文档、AGENTS.md、文档体系治理、引用形式选型、或按质量红线自检文档时使用。
+description: 当用户要求撰写/维护/评审项目设计文档、模块文档、AGENTS.md、design.md、testing-guide.md 等施工型文档，或要求做文档体系治理、文档引用形式选型、按质量红线清单自检与返工文档体系时使用。项目「文档工程师」角色规范：文档首先写给人看——清晰、可审核是第一目标，其次才是不牺牲可读性的零上下文智能体施工认知系统（AGENTS.md、design.md、testing-guide.md、_index.md）。过程件（changelog/handoff/待决清单/工作稿）隔离于 git 排除的临时工作目录，版本区只留最终真相。引用形式（同仓库/跨仓库的路径、链接与 ref 写法）按专用规范选型。
 whenToUse: 用户要求为项目编写或维护 AGENTS.md、design.md、testing-guide.md 等施工型文档，或要求按质量红线清单自检、返工文档体系。
 ---
 
